@@ -711,8 +711,8 @@ void main() { frag = texture(tex, uv); }
 """
 
 
-def default_window_size(info: "VideoInfo"):
-    """屏幕可用区域内取最大的、与视频同宽高比的窗口, 不超过视频原始分辨率。"""
+def default_window_size(info: "VideoInfo", pixel_perfect: bool = False):
+    """屏幕可用区域内取最大的、与视频同宽高比的窗口, 不超过视频原始分辨率; 像素对齐时取整数倍大小(没有黑边)。"""
     dw, dh = pygame.display.get_desktop_sizes()[0]
     avail_w, avail_h = int(dw * 0.92), int(dh * 0.88)
     if sys.platform == "win32":     # 用去掉任务栏的工作区, 再扣掉窗口边框和标题栏
@@ -723,6 +723,9 @@ def default_window_size(info: "VideoInfo"):
             avail_w, avail_h = r.right - r.left - 16, r.bottom - r.top - 72
         except Exception:
             pass
+    if pixel_perfect:
+        (_, _, w, h), _ = fit_rect_integer(avail_w, avail_h, *display_size(info))
+        return w, h
     w = max(320, min(avail_w, int(avail_h * info.aspect), info.width))
     return w, round(w / info.aspect)
 
@@ -745,6 +748,23 @@ def fit_rect(win_w: int, win_h: int, aspect: float):
     else:
         w, h = win_w, round(win_w / aspect)
     return (win_w - w) // 2, (win_h - h) // 2, w, h
+
+
+def display_size(info: "VideoInfo"):
+    """视频按显示宽高比算出的「原始大小」(方形像素时就是 宽×高)。"""
+    return round(info.height * info.aspect), info.height
+
+
+def fit_rect_integer(win_w: int, win_h: int, disp_w: int, disp_h: int):
+    """像素对齐: 缩放倍率只取整数倍(放大 n 倍)或整数分之一(缩小到 1/n), 取窗口放得下的最大值, 居中, 其余留黑边。
+    返回 (GL 矩形 (x, y, w, h), 倍率文字)。不会出现 0.95 这类倍率, 所以每个输出像素严格对应整数个源像素(或反过来)。"""
+    up = int(min(win_w / disp_w, win_h / disp_h))
+    if up >= 1:
+        w, h, label = disp_w * up, disp_h * up, f"{up}x"
+    else:
+        n = max(1, math.ceil(max(disp_w / win_w, disp_h / win_h) - 1e-9))
+        w, h, label = max(1, round(disp_w / n)), max(1, round(disp_h / n)), f"1/{n}x"
+    return ((win_w - w) // 2, (win_h - h) // 2, w, h), label
 
 
 def gl_mat(m: np.ndarray) -> bytes:
@@ -942,6 +962,7 @@ HELP_LINES = (
     "[ / ]   stabilization preset weaker / stronger (smoothing + correction range)",
     "- / =   correction range smaller / larger (fine tune)",
     "X   fill picture-edge gaps from neighbouring frames on / off",
+    "Z   pixel-perfect: integer scale only (1x, 2x, 1/2x...), black borders",
     "1   native 1:1 pixels (shows the center of the frame)   G   render quality",
     "Up/Down   volume     M   mute     , / .   A/V offset",
     "D   next audio output device (if you hear nothing)",
@@ -986,6 +1007,8 @@ class Player:
         self.need_upload = False
         self.rect = (0, 0, 1, 1)
         self.native = False                 # 1:1 原生像素模式
+        self.pixel_perfect = args.pixel_perfect     # 像素对齐: 缩放倍率只取整数倍, 其余留黑边
+        self.pp_label = ""
         self.fill = not args.no_fill        # 全幅稳定: 用相邻帧补缺口
         self.pool_owner = None              # 纹理池里的帧属于哪条流水线(seek 后 idx 重新从 0 数, 必须清池)
         self.cur_pipe = None
@@ -1025,7 +1048,7 @@ class Player:
         for k, v in ((pygame.GL_CONTEXT_MAJOR_VERSION, 3), (pygame.GL_CONTEXT_MINOR_VERSION, 3),
                      (pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)):
             pygame.display.gl_set_attribute(k, v)
-        size = self.args.size or default_window_size(self.info)
+        size = self.args.size or default_window_size(self.info, self.args.pixel_perfect)
         flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
         try:
             pygame.display.set_mode(size, flags, vsync=1)
@@ -1188,12 +1211,16 @@ class Player:
 
     def layout(self, w: int, h: int):
         """返回 (视频在窗口里的矩形, 该矩形覆盖的源像素范围, 稳定器限制校正量用的等效余量倍数)。
-        画面永远是完整的(不裁切、不放大), 按比例缩放到输出大小: 4K 输出 1:1, 2560 宽输出 2/3, 1920 宽输出 1/2。"""
+        画面永远是完整的(不裁切), 按比例缩放到输出大小: 4K 输出 1:1, 2560 宽输出 2/3, 1920 宽输出 1/2。
+        像素对齐模式下倍率只取整数倍或整数分之一, 放不满的部分留黑边。"""
         info = self.info
         if self.native:
             # 1:1 原生像素: 每个窗口像素对应一个源像素, 只显示画面正中央放得下的部分(窗口比视频大就是整幅)。
             vw, vh = min(w, info.width), min(h, info.height)
             return ((w - vw) // 2, (h - vh) // 2, vw, vh), (vw, vh), max(self.zoom, min(info.width / vw, info.height / vh))
+        if self.pixel_perfect:
+            rect, self.pp_label = fit_rect_integer(w, h, *display_size(info))
+            return rect, (info.width, info.height), self.zoom
         return fit_rect(w, h, info.aspect), (info.width, info.height), self.zoom
 
     def fill_sync(self):
@@ -1300,6 +1327,7 @@ class Player:
             tags = [("STAB" if self.mode == "stab" else "ORIG" if self.mode == "orig" else "SPLIT"),
                     f"{PRESETS[self.preset_i][0]} (smooth {self.sigma_sec:.2f}s)",
                     "1:1" if self.native else f"range ±{self.margin_px()}px", "fill" if self.fill else "no-fill",
+                    *([f"pixel-perfect {self.pp_label}"] if self.pixel_perfect and not self.native else []),
                     f"out {self.rect[2]}x{self.rect[3]}"]
             if self.buffering:
                 tags.insert(0, f"buffering {self.buffer_progress * 100:.0f}%")
@@ -1391,6 +1419,10 @@ class Player:
             self.native = not self.native
             log.info("显示模式: %s", "1:1 原生像素" if self.native else "适应窗口")
             self.say("1:1 native pixels (center crop)" if self.native else "Fit to window")
+        elif key == pygame.K_z:
+            self.pixel_perfect = not self.pixel_perfect
+            log.info("像素对齐: %s", "开(倍率只取整数倍, 其余留黑边)" if self.pixel_perfect else "关(按比例缩放填满窗口)")
+            self.say("Pixel-perfect: ON (integer scale only, black borders)" if self.pixel_perfect else "Pixel-perfect: OFF (fit window)")
         elif key == pygame.K_x:
             self.fill = not self.fill
             log.info("相邻帧补缺口: %s", "开" if self.fill else "关")
@@ -1553,6 +1585,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--prebuffer-wait", type=float, default=10.0, help="开播前最多等待多少秒(默认 10), 超时只要前瞻够用就开播")
     ap.add_argument("--buffer-gb", type=float, default=None, help="帧缓冲的内存预算 GB; 默认 = 可用内存减去给系统留的余量(至少 2GB 或总内存的 25%%), 缓冲 10 秒内容为止")
     ap.add_argument("--crop", type=float, help=f"覆盖预设里的校正范围倍数 ({CROP_MIN}~{CROP_MAX}); 范围 = 画面宽 × (1-1/倍数)/2。画面不会被裁切")
+    ap.add_argument("--pixel-perfect", action="store_true",
+                    help="像素对齐: 缩放倍率只取整数倍(1/3、1/2、1、2、3…), 放不满的部分留黑边, 不做 0.95 这类非整数缩放(运行中按 Z 切换)")
     ap.add_argument("--no-fill", action="store_true", help="不用相邻帧补边缘缺口(缺口只做边缘延伸)")
     ap.add_argument("--mode", choices=("stab", "orig", "split"), default="stab", help="起始显示模式: 去抖 / 原片 / 分屏对比")
     ap.add_argument("--quality", choices=QUALITIES, default="high", help="渲染质量, 默认最高; 显卡吃力时可降档(运行中按 G 也行)")
