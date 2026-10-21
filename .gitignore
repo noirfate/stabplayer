@@ -1,0 +1,23 @@
+# 虚拟环境与缓存
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 运行产生的日志、截图
+*.log
+*.log.old
+*.png
+!docs/*.png
+
+# 打包产物与 PyInstaller 自动生成文件(用 build.bat 重新生成)
+build/
+dist/
+*.spec
+
+# 测试视频与评估中间数据
+*.webm
+*.mp4
+*.mkv
+*.mov
+*.npy

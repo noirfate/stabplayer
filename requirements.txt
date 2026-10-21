@@ -1,0 +1,7 @@
+# 运行依赖。以下是在 Windows 10 / Python 3.12.8 上实测的版本组合。
+# Linux(WSL2, Python 3.10)上 av 17.1.0 + numpy 2.2.6 + 其余相同版本也跑通过。
+av==19.0.1
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+pygame==2.6.1
+moderngl==5.13.0

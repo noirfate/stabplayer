@@ -1,0 +1,3 @@
+# 打包 exe 额外需要 PyInstaller(含运行依赖)
+-r requirements.txt
+pyinstaller==6.22.3
